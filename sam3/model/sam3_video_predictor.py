@@ -35,9 +35,11 @@ class Sam3VideoPredictor:
         async_loading_frames=False,
         video_loader_type="cv2",
         apply_temporal_disambiguation: bool = True,
+        async_buffer_size: int = 10,
     ):
         self.async_loading_frames = async_loading_frames
         self.video_loader_type = video_loader_type
+        self.async_buffer_size = async_buffer_size
         from sam3.model_builder import build_sam3_video_model
 
         self.model = (
@@ -115,6 +117,7 @@ class Sam3VideoPredictor:
             resource_path=resource_path,
             async_loading_frames=self.async_loading_frames,
             video_loader_type=self.video_loader_type,
+            async_buffer_size=self.async_buffer_size,
         )
         if not session_id:
             session_id = str(uuid.uuid4())

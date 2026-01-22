@@ -40,10 +40,14 @@ class Sam3VideoInference(Sam3VideoBase):
         **kwargs,
     ):
         """
-        hotstart_delay: int, the delay (in #frames) before the model starts to yield output, 0 to disable hotstart delay.
-        hotstart_unmatch_thresh: int, remove the object if it has this many unmatched frames within its hotstart_delay period.
+        hotstart_delay: int
+            the delay (in #frames) before the model starts to yield output.
+            0 to disable hotstart delay.
+        hotstart_unmatch_thresh: int
+            remove the object if it has this many unmatched frames within its hotstart_delay period.
             If `hotstart_delay` is set to 0, this parameter is ignored.
-        hotstart_dup_thresh: int, remove the object if it has overlapped with another object this many frames within its hotstart_delay period.
+        hotstart_dup_thresh: int
+            remove the object if it has overlapped with another object this many frames withinits hotstart_delay period.
         """
         super().__init__(**kwargs)
         self.image_size = image_size
@@ -58,8 +62,10 @@ class Sam3VideoInference(Sam3VideoBase):
         offload_video_to_cpu=False,
         async_loading_frames=False,
         video_loader_type="cv2",
+        async_buffer_size=10,
     ):
         """Initialize an inference state from `resource_path` (an image or a video)."""
+        # Pass new buffer size parameter
         images, orig_height, orig_width = load_resource_as_video_frames(
             resource_path=resource_path,
             image_size=self.image_size,
@@ -68,9 +74,11 @@ class Sam3VideoInference(Sam3VideoBase):
             img_std=self.image_std,
             async_loading_frames=async_loading_frames,
             video_loader_type=video_loader_type,
+            async_buffer_size=async_buffer_size,
         )
         inference_state = {}
         inference_state["image_size"] = self.image_size
+        # Support both Loader object and Tensor
         inference_state["num_frames"] = len(images)
         # the original video height and width, used for resizing final output scores
         inference_state["orig_height"] = orig_height
@@ -592,7 +600,7 @@ class Sam3VideoInference(Sam3VideoBase):
         #     torch.compile(self._encode_prompt, fullgraph=True, mode="max-autotune")
         # )
 
-        ## Compile SAM3 model components
+        # Compile SAM3 model components
         self.detector.backbone.vision_backbone.forward = clone_output_wrapper(
             torch.compile(
                 self.detector.backbone.vision_backbone.forward,
@@ -624,7 +632,7 @@ class Sam3VideoInference(Sam3VideoBase):
             )
         )
 
-        ## Compile Tracker model components
+        # Compile Tracker model components
         self.tracker.maskmem_backbone.forward = compile_wrapper(
             self.tracker.maskmem_backbone.forward,
             mode="max-autotune",
@@ -666,7 +674,8 @@ class Sam3VideoInference(Sam3VideoBase):
                     inference_state, frame_idx=start_frame_idx, text_str="cat"
                 )
                 logger.info(
-                    f"{i + 1}/{num_rounds} warming up model compilation -- simulating {num_objects}/{self.num_obj_for_compile} objects"
+                    f"{i + 1}/{num_rounds} warming up model compilation --"
+                    f" simulating {num_objects}/{self.num_obj_for_compile} objects"
                 )
                 inference_state = self.add_fake_objects_to_inference_state(
                     inference_state, num_objects, frame_idx=start_frame_idx
@@ -1024,11 +1033,11 @@ class Sam3VideoInferenceWithInstanceInteractivity(Sam3VideoInference):
 
         # step 3: run Tracker partial propagation or direct fetch existing predictions
         assert propagation_type in ["propagation_partial", "propagation_fetch"]
-        logger.debug(
-            f"Running Tracker propagation for objects {obj_ids} and merging it with existing VG predictions (reverse={reverse})."
-            if propagation_type == "propagation_partial"
-            else f"Fetching existing VG predictions without running any propagation (reverse={reverse})."
-        )
+        if propagation_type == "propagation_partial":
+            logger.debug(f"Running Tracker propagation for objects {obj_ids}"
+                         f" and merging it with existing VG predictions (reverse={reverse}).")
+        else:
+            logger.debug(f"Fetching existing VG predictions without running any propagation (reverse={reverse}).")
         processing_order, _ = self._get_processing_order(
             inference_state,
             start_frame_idx=start_frame_idx,
@@ -1193,7 +1202,8 @@ class Sam3VideoInferenceWithInstanceInteractivity(Sam3VideoInference):
     ):
         """
         action_history is used to automatically decide what to do during propagation.
-        action_type: one of ["add", "remove", "refine"] + ["propagation_full", "propagation_partial", "propagation_fetch"]
+        action_type: one of ["add", "remove", "refine"] +
+                     ["propagation_full", "propagation_partial", "propagation_fetch"]
         """
         instance_actions = ["add", "remove", "refine"]
         propagation_actions = [
@@ -1259,7 +1269,8 @@ class Sam3VideoInferenceWithInstanceInteractivity(Sam3VideoInference):
                     # we have run both forward and backward partial/full propagation
                     return "propagation_fetch", None
                 else:
-                    # we have run partial/full forward or backward propagation once, need run it for the rest of the frames
+                    # we have run partial/full forward or backward propagation once,
+                    # need run it for the rest of the frames
                     return action_history[-1]["type"], action_history[-1]["obj_ids"]
 
         # parse actions since last propagation

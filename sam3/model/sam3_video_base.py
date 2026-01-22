@@ -16,7 +16,6 @@ import numpy.typing as npt
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from sam3 import perflib
 from sam3.logger import get_logger
 from sam3.model.box_ops import fast_diag_box_iou
 from sam3.model.data_misc import BatchedDatapoint
@@ -57,7 +56,8 @@ class Sam3VideoBase(nn.Module):
         hotstart_delay=0,
         hotstart_unmatch_thresh=3,
         hotstart_dup_thresh=3,
-        # Whether to suppress masks only within hotstart. If False, we can suppress masks even if they start before hotstart period.
+        # Whether to suppress masks only within hotstart.
+        # If False, we can suppress masks even if they start before hotstart period.
         suppress_unmatched_only_within_hotstart=True,
         init_trk_keep_alive=0,
         max_trk_keep_alive=8,
@@ -363,6 +363,15 @@ class Sam3VideoBase(nn.Module):
             max_frame_num_to_track=max_frame_num_to_track,
             propagate_in_video_start_frame_idx=start_frame_idx,
         )
+
+        # --- ADDED UNLOADING LOGIC ---
+        # If input_batch.img_batch is a Loader with cleanup method, use it
+        if hasattr(input_batch.img_batch, "cleanup"):
+            # Clean up frames past the current prediction window.
+            # We keep a small safety window (e.g. 5 frames) to prevent thrashing on small steps.
+            input_batch.img_batch.cleanup(frame_idx, window_size=5, reverse=reverse)
+        # -----------------------------
+
         # note: detections in `sam3_image_out` has already gone through NMS
         pred_probs = sam3_image_out["pred_logits"].squeeze(-1).sigmoid()
         if not allow_new_detections:
@@ -462,7 +471,7 @@ class Sam3VideoBase(nn.Module):
     ):
         # Recondition the masklets based on the new detections
         for trk_obj_id, det_idx in trk_id_to_max_iou_high_conf_det.items():
-            new_mask = det_out["mask"][det_idx : det_idx + 1]
+            new_mask = det_out["mask"][det_idx: det_idx + 1]
             input_mask_res = self.tracker.input_mask_size
             new_mask_binary = (
                 F.interpolate(
@@ -483,11 +492,13 @@ class Sam3VideoBase(nn.Module):
                 if (
                     trk_obj_id in inference_state["obj_ids"]
                     # NOTE: Goal of this condition is to avoid reconditioning masks that are occluded/low qualiy.
-                    # Unfortunately, these can get reconditioned anyway due to batching. We should consider removing these heuristics.
+                    # Unfortunately, these can get reconditioned anyway due to batching.
+                    # We should consider removing these heuristics.
                     and obj_score > HIGH_CONF_THRESH
                 ):
                     logger.debug(
-                        f"Adding new mask for track {trk_obj_id} at frame {frame_idx}. Objects {inference_state['obj_ids']} are all reconditioned."
+                        f"Adding new mask for track {trk_obj_id} at frame {frame_idx}."
+                        f"Objects {inference_state['obj_ids']} are all reconditioned."
                     )
                     self.tracker.add_new_mask(
                         inference_state=inference_state,
@@ -639,14 +650,14 @@ class Sam3VideoBase(nn.Module):
                 num_obj_dropped_due_to_limit,
                 trk_id_to_max_iou_high_conf_det,
             ) = update_plan
-            # metadata consistency check: verify that the received `num_obj_per_gpu_on_rank0` is consistent with the local metadata
-            # it's critical that all GPUs agree on the previous number of objects (otherwise the inference might hang or fail silently)
-            if not np.all(
-                num_obj_per_gpu_on_rank0 == tracker_metadata_prev["num_obj_per_gpu"]
-            ):
+            # metadata consistency check:
+            # verify that the received `num_obj_per_gpu_on_rank0` is consistent with the local metadata.
+            # it's critical that all GPUs agree on the previous number of objects
+            # (otherwise the inference might hang or fail silently)
+            if not np.all(num_obj_per_gpu_on_rank0 == tracker_metadata_prev["num_obj_per_gpu"]):
                 raise RuntimeError(
                     f"{self.rank=} received {num_obj_per_gpu_on_rank0=}, which is inconsistent with local record "
-                    f"{tracker_metadata_prev['num_obj_per_gpu']=}. There's likely a bug in update planning or execution."
+                    f"{tracker_metadata_prev['num_obj_per_gpu']=}. There's likely a bug in update planning or execution."  # noqa: E501
                 )
 
         # `tracker_update_plan` should be identical on all GPUs after broadcasting
@@ -827,7 +838,9 @@ class Sam3VideoBase(nn.Module):
         reverse: bool = False,
     ):
         """
-        Suppress overlapping masks based on the most recent occlusion information. If an object is removed by hotstart, we always suppress it if it overlaps with any other object.
+        Suppress overlapping masks based on the most recent occlusion information.
+        XIf an object is removed by hotstart, we always suppress it if it overlaps with any other object.
+
         Args:
             frame_idx (int): The current frame index.
             tracker_low_res_masks_global (Tensor): The low-resolution masks for the current frame.
@@ -845,7 +858,9 @@ class Sam3VideoBase(nn.Module):
                 f"Mismatch in number of objects: {len(obj_ids_global)} vs {batch_size}"
             )
             NEVER_OCCLUDED = -1
-            ALWAYS_OCCLUDED = 100000  # This value should be larger than any possible frame index, indicates that the object was removed by hotstart logic
+            # This value should be larger than any possible frame index,
+            # indicates that the object was removed by hotstart logic
+            ALWAYS_OCCLUDED = 500000
             last_occluded_prev = torch.cat(
                 [
                     tracker_metadata_prev["obj_id_to_last_occluded"].get(
@@ -880,7 +895,7 @@ class Sam3VideoBase(nn.Module):
             last_occluded_new[is_obj_occluded_or_suppressed] = frame_idx
             # Slice out the last occluded frame for each object
             tracker_metadata_new["obj_id_to_last_occluded"] = {
-                obj_id: last_occluded_new[obj_idx : obj_idx + 1]
+                obj_id: last_occluded_new[obj_idx: obj_idx + 1]
                 for obj_idx, obj_id in enumerate(obj_ids_global)
             }
 
@@ -1082,7 +1097,8 @@ class Sam3VideoBase(nn.Module):
                 for j in range(batch_size):
                     if suppress_i_mask[i, j]:
                         logger.debug(
-                            f"{frame_idx=}: Suppressing obj {obj_ids[i]} last occluded {last_occluded[i]} in favor of {obj_ids[j]} last occluded {last_occluded[j]}"
+                            f"{frame_idx=}: Suppressing obj {obj_ids[i]} last occluded {last_occluded[i]}"
+                            f" in favor of {obj_ids[j]} last occluded {last_occluded[j]}"
                         )
 
             # Log j-suppression cases (where j gets suppressed in favor of i)
@@ -1090,7 +1106,8 @@ class Sam3VideoBase(nn.Module):
                 for j in range(batch_size):
                     if suppress_j_mask[i, j]:
                         logger.debug(
-                            f"{frame_idx=}: Suppressing obj {obj_ids[j]} last occluded {last_occluded[j]} in favor of {obj_ids[i]} last occluded {last_occluded[i]}"
+                            f"{frame_idx=}: Suppressing obj {obj_ids[j]} last occluded {last_occluded[j]}"
+                            f" in favor of {obj_ids[i]} last occluded {last_occluded[i]}"
                         )
 
         return to_suppress
@@ -1130,7 +1147,8 @@ class Sam3VideoBase(nn.Module):
 
             # only 1 frames should be propagated
             assert num_frames_propagated == 1 and out_frame_idx == frame_idx, (
-                f"num_frames_propagated: {num_frames_propagated}, out_frame_idx: {out_frame_idx}, frame_idx: {frame_idx}"
+                "num_frames_propagated:"
+                f" {num_frames_propagated}, out_frame_idx: {out_frame_idx}, frame_idx: {frame_idx}"
             )
             assert isinstance(out_obj_ids, list)
             obj_ids_local.extend(out_obj_ids)
@@ -1348,29 +1366,35 @@ class Sam3VideoBase(nn.Module):
             trk_keep_alive[obj_id] = self.init_trk_keep_alive
 
         matched_trks = set()
-        # We use the det-->tracks list to check for matched objects. Otherwise, we need to compute areas to decide whether they're occluded
+        # We use the det-->tracks list to check for matched objects.\
+        # Otherwise, we need to compute areas to decide whether they're occluded
         for matched_trks_per_det in det_to_matched_trk_obj_ids.values():
             matched_trks.update(matched_trks_per_det)
         for obj_id in matched_trks:
-            # NOTE: To minimize number of configurable params, we use the hotstart_unmatch_thresh to set the max value of trk_keep_alive
+            # NOTE: To minimize number of configurable params,
+            # we use the hotstart_unmatch_thresh to set the max value of trk_keep_alive
             trk_keep_alive[obj_id] = min(
                 self.max_trk_keep_alive, trk_keep_alive[obj_id] + 1
             )
         for obj_id in unmatched_trk_obj_ids:
             unmatched_frame_inds[obj_id].append(frame_idx)
-            # NOTE: To minimize number of configurable params, we use the hotstart_unmatch_thresh to set the min value of trk_keep_alive
-            # The max keep alive is 2x the min, means the model prefers to keep the prediction rather than suppress it if it was matched long enough.
+            # NOTE: To minimize number of configurable params,
+            # we use the hotstart_unmatch_thresh to set the min value of trk_keep_alive.
+            # The max keep alive is 2x the min, means the model prefers to keep the prediction
+            # rather than suppress it if it was matched long enough.
             trk_keep_alive[obj_id] = max(
                 self.min_trk_keep_alive, trk_keep_alive[obj_id] - 1
             )
         if self.decrease_trk_keep_alive_for_empty_masklets:
             for obj_id in empty_trk_obj_ids:
-                # NOTE: To minimize number of configurable params, we use the hotstart_unmatch_thresh to set the min value of trk_keep_alive
+                # NOTE: To minimize number of configurable params, we use the hotstart_unmatch_thresh
+                # to set the min value of trk_keep_alive
                 trk_keep_alive[obj_id] = max(
                     self.min_trk_keep_alive, trk_keep_alive[obj_id] - 1
                 )
 
-        # Step 2: removed tracks that has not matched with detections for `hotstart_unmatch_thresh` frames with hotstart period
+        # Step 2: removed tracks that has not matched with detections for `hotstart_unmatch_thresh`
+        # frames with hotstart period
         # a) add unmatched frame indices for each existing object ID
         # note that `unmatched_trk_obj_ids` contains those frames where the SAM2 output mask
         # doesn't match any detection; it excludes those frames where SAM2 gives an empty mask
@@ -1458,7 +1482,8 @@ class Sam3VideoBase(nn.Module):
             mode="bilinear",
             align_corners=False,
         )
-        # We first apply non-overlapping constraints before memory encoding. This may include some suppression heuristics.
+        # We first apply non-overlapping constraints before memory encoding.
+        # This may include some suppression heuristics.
         if not hasattr(self, "_warm_up_complete") or self._warm_up_complete:
             high_res_masks = self.tracker._suppress_object_pw_area_shrinkage(
                 high_res_masks
@@ -1482,7 +1507,8 @@ class Sam3VideoBase(nn.Module):
                 start_idx_state:end_idx_state
             ]
             local_batch_size = local_high_res_masks.size(0)
-            # Run Sam2 memory encoder. Note that we do not re-enforce the non-overlapping constraint as it is turned off by default
+            # Run Sam2 memory encoder. Note that we do not re-enforce the non-overlapping
+            # constraint as it is turned off by default
 
             encoded_mem = self.tracker._run_memory_encoder(
                 tracker_state,

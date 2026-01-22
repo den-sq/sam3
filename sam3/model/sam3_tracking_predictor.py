@@ -20,25 +20,45 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
 
     def __init__(
         self,
-        # whether to clear non-conditioning memory of the surrounding frames (which may contain outdated information) after adding correction clicks;
-        # note that this would only apply to *single-object tracking* unless `clear_non_cond_mem_for_multi_obj` is also set to True)
         clear_non_cond_mem_around_input=False,
-        # whether to also clear non-conditioning memory of the surrounding frames (only effective when `clear_non_cond_mem_around_input` is True).
         clear_non_cond_mem_for_multi_obj=False,
-        # if fill_hole_area > 0, we fill small holes in the final masks up to this area (after resizing them to the original video resolution)
         fill_hole_area=0,
-        # if always_start_from_first_ann_frame is True, we always start tracking from the frame where we receive the first annotation (clicks or mask)
-        # and ignore the `start_frame_idx` passed to `propagate_in_video`
         always_start_from_first_ann_frame=False,
-        # the maximum number of points to be used in the prompt encoder, which reduce the domain gap between training (that only has 8 points)
-        # - if it's set to a positive integer, we only take the `max_point_num_in_prompt_enc//2` points and
-        #   the last `(max_point_num_in_prompt_enc - max_point_num_in_prompt_enc//2)` points in the prompt encoder
-        # - if it's set to 0 or negative, this option is turned off and we use all points in the prompt encoder
         max_point_num_in_prompt_enc=16,
         non_overlap_masks_for_output=True,
-        # checkpoint_file=None,
         **kwargs,
     ):
+        """
+        Initialize the Sam3TrackerPredictor.
+
+        Parameters
+        ----------
+        clear_non_cond_mem_around_input : bool, optional
+            Whether to clear non-conditioning memory of the surrounding frames (which may contain
+            outdated information) after adding correction clicks. Note that this would only apply to
+            *single-object tracking* unless `clear_non_cond_mem_for_multi_obj` is also set to True.
+            Default is False.
+        clear_non_cond_mem_for_multi_obj : bool, optional
+            Whether to also clear non-conditioning memory of the surrounding frames (only effective
+            when `clear_non_cond_mem_around_input` is True). Default is False.
+        fill_hole_area : int, optional
+            If fill_hole_area > 0, small holes in the final masks up to this area will be filled
+            (after resizing them to the original video resolution). Default is 0.
+        always_start_from_first_ann_frame : bool, optional
+            If True, always start tracking from the frame where the first annotation (clicks or mask)
+            is received and ignore the `start_frame_idx` passed to `propagate_in_video`. Default is False.
+        max_point_num_in_prompt_enc : int, optional
+            The maximum number of points to be used in the prompt encoder, which reduces the domain
+            gap between training (that only has 8 points). If set to a positive integer, only the
+            `max_point_num_in_prompt_enc//2` points and the last
+            `(max_point_num_in_prompt_enc - max_point_num_in_prompt_enc//2)` points will be used in
+            the prompt encoder. If set to 0 or negative, this option is turned off and all points in
+            the prompt encoder are used. Default is 16.
+        non_overlap_masks_for_output : bool, optional
+            Whether to apply non-overlapping constraints to output masks. Default is True.
+        **kwargs
+            Additional keyword arguments passed to the parent class.
+        """
         super().__init__(**kwargs)
         self.clear_non_cond_mem_around_input = clear_non_cond_mem_around_input
         self.clear_non_cond_mem_for_multi_obj = clear_non_cond_mem_for_multi_obj
@@ -65,15 +85,40 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         offload_state_to_cpu=False,
         async_loading_frames=False,
     ):
-        """Initialize a inference state."""
+        """
+        Initialize a inference state.
+
+        Parameters
+        ----------
+        video_height : int, optional
+            The original video height (used for resizing final output scores).
+        video_width : int, optional
+            The original video width (used for resizing final output scores).
+        num_frames : int, optional
+            The total number of frames in the video.
+        video_path : str, optional
+            Path to the video file (if provided, video frames will be loaded).
+        cached_features : dict, optional
+            Pre-computed visual features on a small number of recently visited frames for quick
+            interactions.
+        offload_video_to_cpu : bool, optional
+            Whether to offload the video frames to CPU memory. Turning on this option saves GPU
+            memory with only a very small overhead. Default is False.
+        offload_state_to_cpu : bool, optional
+            Whether to offload the inference state to CPU memory. Turning on this option saves GPU
+            memory at the cost of a lower tracking fps (e.g. in a test case of 768x768 model, fps
+            dropped from 27 to 24 when tracking one object and from 24 to 21 when tracking two
+            objects). Default is False.
+        async_loading_frames : bool, optional
+            Whether to asynchronously load video frames. Default is False.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the initialized inference state.
+        """
         inference_state = {}
-        # whether to offload the video frames to CPU memory
-        # turning on this option saves the GPU memory with only a very small overhead
         inference_state["offload_video_to_cpu"] = offload_video_to_cpu
-        # whether to offload the inference state to CPU memory
-        # turning on this option saves the GPU memory at the cost of a lower tracking fps
-        # (e.g. in a test case of 768x768 model, fps dropped from 27 to 24 when tracking one object
-        # and from 24 to 21 when tracking two objects)
         inference_state["offload_state_to_cpu"] = offload_state_to_cpu
         inference_state["device"] = self.device
         if offload_state_to_cpu:
@@ -190,7 +235,38 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         normalize_coords=True,
         box=None,
     ):
-        """Add new points to a frame."""
+        """
+        Add new points or box to a frame for object tracking.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        frame_idx : int
+            The index of the frame to add points to.
+        obj_id : int
+            The client-side object ID for tracking.
+        points : ndarray, optional
+            Input points coordinates (optional).
+        labels : ndarray, optional
+            Labels for the input points (optional). Must be provided together with points.
+        clear_old_points : bool, optional
+            Whether to clear previously added points. Default is True.
+        rel_coordinates : bool, optional
+            Whether the input coordinates are relative (normalized to [0, 1]). Default is True.
+        use_prev_mem_frame : bool, optional
+            Whether to use previous frame's memory for inference. Default is False.
+        normalize_coords : bool, optional
+            Whether to normalize coordinates. Default is True.
+        box : ndarray, optional
+            Bounding box to use as input (optional). If provided, it will be added as the first
+            two points with labels 2 and 3.
+
+        Returns
+        -------
+        tuple
+            A tuple of (frame_idx, obj_ids, low_res_masks, video_res_masks).
+        """
         obj_idx = self._obj_id_to_idx(inference_state, obj_id)
         point_inputs_per_frame = inference_state["point_inputs_per_obj"][obj_idx]
         mask_inputs_per_frame = inference_state["mask_inputs_per_obj"][obj_idx]
@@ -348,7 +424,27 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         mask,
         add_mask_to_memory=False,
     ):
-        """Add new mask to a frame."""
+        """
+        Add new mask to a frame for object tracking.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        frame_idx : int
+            The index of the frame to add the mask to.
+        obj_id : int
+            The client-side object ID for tracking.
+        mask : ndarray
+            Binary mask input (2D tensor).
+        add_mask_to_memory : bool, optional
+            Whether to add this mask to the model memory. Default is False.
+
+        Returns
+        -------
+        tuple
+            A tuple of (frame_idx, obj_ids, low_res_masks, video_res_masks).
+        """
         obj_idx = self._obj_id_to_idx(inference_state, obj_id)
         point_inputs_per_frame = inference_state["point_inputs_per_obj"][obj_idx]
         mask_inputs_per_frame = inference_state["mask_inputs_per_obj"][obj_idx]
@@ -464,8 +560,19 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
 
     def _get_orig_video_res_output(self, inference_state, any_res_masks):
         """
-        Resize the object scores to the original video resolution (video_res_masks)
-        and apply non-overlapping constraints for final output.
+        Resize the object scores to the original video resolution and apply non-overlapping constraints.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        any_res_masks : ndarray
+            Mask scores at any resolution to be resized to video resolution.
+
+        Returns
+        -------
+        tuple
+            A tuple of (any_res_masks, video_res_masks) with the processed masks.
         """
         device = inference_state["device"]
         video_H = inference_state["video_height"]
@@ -499,12 +606,31 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
     ):
         """
         Consolidate the per-object temporary outputs in `temp_output_dict_per_obj` on
-        a frame into a single output for all objects, including
+        a frame into a single output for all objects, including:
+
         1) fill any missing objects either from `output_dict_per_obj` (if they exist in
            `output_dict_per_obj` for this frame) or leave them as placeholder values
            (if they don't exist in `output_dict_per_obj` for this frame);
-        2) if specified, rerun memory encoder after apply non-overlapping constraints
+        2) if specified, rerun memory encoder after applying non-overlapping constraints
            on the object scores.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        frame_idx : int
+            The frame index to consolidate outputs for.
+        is_cond : bool
+            Whether to consolidate conditioning or non-conditioning frames.
+        run_mem_encoder : bool
+            Whether to rerun the memory encoder after consolidation.
+        consolidate_at_video_res : bool, optional
+            Whether to consolidate at video resolution (for mask prompts). Default is False.
+
+        Returns
+        -------
+        dict
+            A consolidated output dictionary for all objects on the frame.
         """
         batch_size = self._get_obj_num(inference_state)
         storage_key = "cond_frame_outputs" if is_cond else "non_cond_frame_outputs"
@@ -580,14 +706,14 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
                             inference_state, frame_idx
                         )
                     # fill object pointer with a dummy pointer (based on an empty mask)
-                    consolidated_out["obj_ptr"][obj_idx : obj_idx + 1] = empty_mask_ptr
+                    consolidated_out["obj_ptr"][obj_idx: obj_idx + 1] = empty_mask_ptr
                 continue
             # Add the temporary object output mask to consolidated output mask
             # (use "pred_masks_video_res" if it's available)
             obj_mask = out.get("pred_masks_video_res", out["pred_masks"])
             consolidated_pred_masks = consolidated_out[consolidated_mask_key]
             if obj_mask.shape[-2:] == consolidated_pred_masks.shape[-2:]:
-                consolidated_pred_masks[obj_idx : obj_idx + 1] = obj_mask
+                consolidated_pred_masks[obj_idx: obj_idx + 1] = obj_mask
             else:
                 # Resize first if temporary object mask has a different resolution
                 is_downsampling = "pred_masks_video_res" in out
@@ -598,13 +724,13 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
                     align_corners=False,
                     antialias=is_downsampling,  # use antialias for downsampling
                 )
-                consolidated_pred_masks[obj_idx : obj_idx + 1] = resized_obj_mask
-            consolidated_out["obj_ptr"][obj_idx : obj_idx + 1] = out["obj_ptr"]
-            consolidated_out["object_score_logits"][obj_idx : obj_idx + 1] = out[
+                consolidated_pred_masks[obj_idx: obj_idx + 1] = resized_obj_mask
+            consolidated_out["obj_ptr"][obj_idx: obj_idx + 1] = out["obj_ptr"]
+            consolidated_out["object_score_logits"][obj_idx: obj_idx + 1] = out[
                 "object_score_logits"
             ]
             if self.use_memory_selection:
-                consolidated_out["iou_score"][obj_idx : obj_idx + 1] = out["iou_score"]
+                consolidated_out["iou_score"][obj_idx: obj_idx + 1] = out["iou_score"]
         # Optionally, apply non-overlapping constraints on the consolidated scores
         # and rerun the memory encoder
         if run_mem_encoder:
@@ -630,7 +756,21 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         return consolidated_out
 
     def _get_empty_mask_ptr(self, inference_state, frame_idx):
-        """Get a dummy object pointer based on an empty mask on the current frame."""
+        """
+        Get a dummy object pointer based on an empty mask on the current frame.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        frame_idx : int
+            The frame index to process.
+
+        Returns
+        -------
+        ndarray
+            A dummy object pointer tensor for use in consolidation.
+        """
         # A dummy (empty) mask with a single object
         batch_size = 1
         mask_inputs = torch.zeros(
@@ -671,7 +811,16 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
 
     @torch.inference_mode()
     def propagate_in_video_preflight(self, inference_state, run_mem_encoder=True):
-        """Prepare inference_state and consolidate temporary outputs before tracking."""
+        """
+        Prepare inference_state and consolidate temporary outputs before tracking.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        run_mem_encoder : bool, optional
+            Whether to run the memory encoder on consolidated outputs. Default is True.
+        """
         # Tracking has started and we don't allow adding new objects until session is reset.
         inference_state["tracking_has_started"] = True
         batch_size = self._get_obj_num(inference_state)
@@ -759,6 +908,25 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
     def _get_processing_order(
         self, inference_state, start_frame_idx, max_frame_num_to_track, reverse
     ):
+        """
+        Get the frame processing order for tracking.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        start_frame_idx : int
+            The starting frame index for tracking.
+        max_frame_num_to_track : int, optional
+            Maximum number of frames to track (None for all frames).
+        reverse : bool
+            Whether to track in reverse time order.
+
+        Returns
+        -------
+        range or list
+            Frame indices indicating the processing order.
+        """
         num_frames = inference_state["num_frames"]
         # set start index, end index, and processing order
         if self.always_start_from_first_ann_frame:
@@ -798,7 +966,33 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         run_mem_encoder=True,
         propagate_preflight=False,
     ):
-        """Propagate the input points across frames to track in the entire video."""
+        """
+        Propagate the input points across frames to track in the entire video.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        start_frame_idx : int
+            The starting frame index for tracking.
+        max_frame_num_to_track : int, optional
+            Maximum number of frames to track (None for all frames).
+        reverse : bool
+            Whether to track in reverse time order.
+        tqdm_disable : bool, optional
+            Whether to disable the progress bar. Default is False.
+        obj_ids : list, optional
+            Specific object IDs to track (not fully supported yet).
+        run_mem_encoder : bool, optional
+            Whether to run the memory encoder during tracking. Default is True.
+        propagate_preflight : bool, optional
+            Whether to run preflight checks before propagation. Default is False.
+
+        Yields
+        ------
+        tuple
+            Tuples of (frame_idx, obj_ids, low_res_masks, video_res_masks, obj_scores) for each frame.
+        """
         if propagate_preflight:
             self.propagate_in_video_preflight(inference_state)
         # NOTE: This is a copy from the parent class, except that we return object scores as well.
@@ -878,6 +1072,18 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         """
         Split a multi-object output into per-object output slices and add them into
         `output_dict_per_obj`. The resulting slices share the same tensor storage.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        frame_idx : int
+            The frame index for the outputs.
+        current_out : dict
+            The consolidated multi-object output dictionary.
+        storage_key : str
+            Key indicating whether outputs are for conditioning or non-conditioning frames
+            ("cond_frame_outputs" or "non_cond_frame_outputs").
         """
         maskmem_features = current_out["maskmem_features"]
         assert maskmem_features is None or isinstance(maskmem_features, torch.Tensor)
@@ -907,7 +1113,26 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
     def clear_all_points_in_frame(
         self, inference_state, frame_idx, obj_id, need_output=True
     ):
-        """Remove all input points or mask in a specific frame for a given object."""
+        """
+        Remove all input points or mask in a specific frame for a given object.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        frame_idx : int
+            The frame index to clear points from.
+        obj_id : int
+            The object ID for which to clear points.
+        need_output : bool, optional
+            Whether to return updated masks after clearing. Default is True.
+
+        Returns
+        -------
+        tuple, optional
+            If need_output is True, a tuple of (frame_idx, obj_ids, low_res_masks, video_res_masks).
+            Otherwise, None.
+        """
         obj_idx = self._obj_id_to_idx(inference_state, obj_id)
 
         # Clear the conditioning information on the given frame
@@ -977,7 +1202,14 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
 
     @torch.inference_mode()
     def clear_all_points_in_video(self, inference_state):
-        """Remove all input points or mask in all frames throughout the video."""
+        """
+        Remove all input points or mask in all frames throughout the video.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        """
         self._reset_tracking_results(inference_state)
         # Remove all object ids
         inference_state["obj_id_to_idx"].clear()
@@ -989,7 +1221,14 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         inference_state["temp_output_dict_per_obj"].clear()
 
     def _reset_tracking_results(self, inference_state):
-        """Reset all tracking inputs and results across the videos."""
+        """
+        Reset all tracking inputs and results across the videos.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        """
         for v in inference_state["point_inputs_per_obj"].values():
             v.clear()
         for v in inference_state["mask_inputs_per_obj"].values():
@@ -1009,7 +1248,23 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         inference_state["first_ann_frame_idx"] = None
 
     def _get_image_feature(self, inference_state, frame_idx, batch_size):
-        """Compute the image features on a given frame."""
+        """
+        Compute the image features on a given frame.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        frame_idx : int
+            The index of the frame to extract features from.
+        batch_size : int
+            The batch size for feature expansion (for multi-object tracking).
+
+        Returns
+        -------
+        tuple
+            A tuple containing (expanded_image, _, current_vision_feats, current_vision_pos_embeds, feat_sizes).
+        """
         # Look up in the cache
         image, backbone_out = inference_state["cached_features"].get(
             frame_idx, (None, None)
@@ -1061,7 +1316,39 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         prev_sam_mask_logits=None,
         use_prev_mem_frame=True,
     ):
-        """Run tracking on a single frame based on current inputs and previous memory."""
+        """
+        Run tracking on a single frame based on current inputs and previous memory.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        output_dict : dict
+            Dictionary to store outputs for the object(s).
+        frame_idx : int
+            The index of the frame to process.
+        batch_size : int
+            The batch size (number of objects).
+        is_init_cond_frame : bool
+            Whether this is an initial conditioning frame.
+        point_inputs : dict, optional
+            Input point coordinates and labels (optional).
+        mask_inputs : ndarray, optional
+            Input mask(s) (optional).
+        reverse : bool
+            Whether to track in reverse time order.
+        run_mem_encoder : bool
+            Whether to run the memory encoder.
+        prev_sam_mask_logits : ndarray, optional
+            Previous SAM mask logits for iterative refinement.
+        use_prev_mem_frame : bool, optional
+            Whether to use previous frame's memory. Default is True.
+
+        Returns
+        -------
+        tuple
+            A tuple of (compact_current_out, pred_masks_gpu) containing the inference results.
+        """
         # Retrieve correct image features
         (
             image,
@@ -1128,7 +1415,27 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         """
         Run the memory encoder on `high_res_masks`. This is usually after applying
         non-overlapping constraints to object scores. Since their scores changed, their
-        memory also need to be computed again with the memory encoder.
+        memory also needs to be computed again with the memory encoder.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        frame_idx : int
+            The index of the frame to process.
+        batch_size : int
+            The batch size (number of objects).
+        high_res_masks : ndarray
+            High-resolution mask predictions.
+        object_score_logits : ndarray
+            Object score logits indicating object presence.
+        is_mask_from_pts : bool
+            Whether the masks come from point inputs (vs other sources).
+
+        Returns
+        -------
+        tuple
+            A tuple of (maskmem_features, maskmem_pos_enc) containing the encoded memory.
         """
         # Retrieve correct image features
         image, _, current_vision_feats, _, feat_sizes = self._get_image_feature(
@@ -1155,8 +1462,22 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
 
     def _get_maskmem_pos_enc(self, inference_state, current_out):
         """
+        Get or cache mask memory positional encoding.
+
         `maskmem_pos_enc` is the same across frames and objects, so we cache it as
         a constant in the inference session to reduce session storage size.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        current_out : dict
+            The current output dictionary containing maskmem_pos_enc.
+
+        Returns
+        -------
+        list or None
+            The expanded maskmem_pos_enc tensors or None if not available.
         """
         model_constants = inference_state["constants"]
         # "out_maskmem_pos_enc" should be either a list of tensors or None
@@ -1181,8 +1502,25 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
     @torch.inference_mode()
     def remove_object(self, inference_state, obj_id, strict=False, need_output=True):
         """
-        Remove an object id from the tracking state. If strict is True, we check whether
-        the object id actually exists and raise an error if it doesn't exist.
+        Remove an object id from the tracking state.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        obj_id : int
+            The object ID to remove.
+        strict : bool, optional
+            If True, raise an error if the object id doesn't exist. If False, silently return if
+            object doesn't exist. Default is False.
+        need_output : bool, optional
+            Whether to return updated masks for affected frames. Default is True.
+
+        Returns
+        -------
+        tuple
+            A tuple of (obj_ids, updated_frames) where obj_ids is the list of remaining object
+            IDs and updated_frames is a list of (frame_idx, video_res_masks) tuples.
         """
         old_obj_idx_to_rm = inference_state["obj_id_to_idx"].get(obj_id, None)
         updated_frames = []
@@ -1299,12 +1637,19 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
 
     def _clear_non_cond_mem_around_input(self, inference_state, frame_idx):
         """
-        Remove the non-conditioning memory around the input frame. When users provide
-        correction clicks, the surrounding frames' non-conditioning memories can still
-        contain outdated object appearance information and could confuse the model.
+        Remove the non-conditioning memory around the input frame.
 
-        This method clears those non-conditioning memories surrounding the interacted
-        frame to avoid giving the model both old and new information about the object.
+        When users provide correction clicks, the surrounding frames' non-conditioning memories
+        can still contain outdated object appearance information and could confuse the model.
+        This method clears those non-conditioning memories surrounding the interacted frame to
+        avoid giving the model both old and new information about the object.
+
+        Parameters
+        ----------
+        inference_state : dict
+            The current inference state dictionary.
+        frame_idx : int
+            The index of the frame where user interaction occurred.
         """
         r = self.memory_temporal_stride_for_eval
         frame_idx_begin = frame_idx - r * self.num_maskmem
@@ -1319,6 +1664,23 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
     def _suppress_shrinked_masks(
         self, pred_masks, new_pred_masks, shrink_threshold=0.3
     ):
+        """
+        Suppress masks that have shrunk significantly after applying constraints.
+
+        Parameters
+        ----------
+        pred_masks : ndarray
+            Original predicted masks.
+        new_pred_masks : ndarray
+            New masks after constraint application.
+        shrink_threshold : float, optional
+            Ratio threshold below which masks are considered shrunken. Default is 0.3.
+
+        Returns
+        -------
+        ndarray
+            Masks with significant shrinkage suppressed.
+        """
         area_before = (pred_masks > 0).sum(dim=(-1, -2))
         area_after = (new_pred_masks > 0).sum(dim=(-1, -2))
         area_before = torch.clamp(area_before, min=1.0)
@@ -1332,8 +1694,19 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
 
     def _suppress_object_pw_area_shrinkage(self, pred_masks):
         """
-        This function suppresses masks that shrink in area after applying pixelwise non-overlapping constriants.
+        Suppress masks that shrink in area after applying pixelwise non-overlapping constraints.
+
         Note that the final output can still be overlapping.
+
+        Parameters
+        ----------
+        pred_masks : ndarray
+            Predicted mask scores to process.
+
+        Returns
+        -------
+        ndarray
+            Masks with significant area shrinkage suppressed.
         """
         # Apply pixel-wise non-overlapping constraint based on mask scores
         pixel_level_non_overlapping_masks = super()._apply_non_overlapping_constraints(
@@ -1350,7 +1723,21 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         self, pred_masks, obj_scores, background_value=-10.0
     ):
         """
-        Applies non-overlapping constraints object wise (i.e. only one object can claim the overlapping region)
+        Apply non-overlapping constraints object-wise (i.e. only one object can claim the overlapping region).
+
+        Parameters
+        ----------
+        pred_masks : ndarray
+            Predicted mask scores for all objects.
+        obj_scores : ndarray
+            Object score logits indicating object presence.
+        background_value : float, optional
+            Score value to assign to background regions. Default is -10.0.
+
+        Returns
+        -------
+        ndarray
+            Masks with object-wise non-overlapping constraints applied.
         """
         # Replace pixel scores with object scores
         pred_masks_single_score = torch.where(
