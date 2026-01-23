@@ -51,20 +51,6 @@ dev = [
     "numba",
     "python-rapidjson",
 ]
-notebooks = [
-    "matplotlib",
-    "jupyter",
-    "notebook",
-    "ipywidgets",
-    "ipycanvas",
-    "ipympl",
-    "pycocotools",
-    "decord",
-    "opencv-python",
-    "einops",
-    "scikit-image",
-    "scikit-learn",
-]
 train = [
     "hydra-core",
     "submitit",
