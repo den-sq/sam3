@@ -5,7 +5,7 @@
 Misc functions, including distributed helpers.
 """
 
-from dataclasses import dataclass, field as fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, get_args, get_origin, List, Optional, Union
 
 import torch
