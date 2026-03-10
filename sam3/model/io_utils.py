@@ -26,8 +26,9 @@ class VideoLoader(abc.ABC):
     def __init__(self, num_frames, image_size, img_mean, img_std, device="cpu"):
         self.num_frames = num_frames
         self.image_size = image_size
-        self.img_mean = img_mean
-        self.img_std = img_std
+        # Normalize mean/std to tensors so frame normalization arithmetic is valid.
+        self.img_mean = torch.as_tensor(img_mean, dtype=torch.float16).reshape(-1, 1, 1)
+        self.img_std = torch.as_tensor(img_std, dtype=torch.float16).reshape(-1, 1, 1)
         self.device = device
         # Mock Tensor properties for compatibility
         self.shape = (num_frames, 3, image_size, image_size)
