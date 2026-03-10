@@ -2,10 +2,11 @@
 
 # pyre-unsafe
 
+import abc
 import os
+import re
 import time
 from threading import Lock, Thread
-import abc
 
 import numpy as np
 import torch
@@ -23,7 +24,16 @@ VIDEO_EXTS = [".mp4", ".mov", ".avi", ".mkv", ".webm"]
 
 
 class VideoLoader(abc.ABC):
-    def __init__(self, num_frames, image_size, img_mean, img_std, device="cpu"):
+    def __init__(
+        self,
+        num_frames,
+        image_size,
+        img_mean,
+        img_std,
+        device="cpu",
+        video_height=None,
+        video_width=None,
+    ):
         self.num_frames = num_frames
         self.image_size = image_size
         # Normalize mean/std to tensors so frame normalization arithmetic is valid.
@@ -33,8 +43,8 @@ class VideoLoader(abc.ABC):
         # Mock Tensor properties for compatibility
         self.shape = (num_frames, 3, image_size, image_size)
         self.ndim = 4
-        self.video_height = None
-        self.video_width = None
+        self.video_height = video_height
+        self.video_width = video_width
 
     @abc.abstractmethod
     def __getitem__(self, idx):
@@ -52,6 +62,17 @@ class VideoLoader(abc.ABC):
         # Mocking .to() to be compatible with typical tensor operations, though strictly no-op here
         return self
 
+    def close(self):
+        """Release loader resources. Subclasses can override."""
+        return None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            # Destructors should never raise.
+            pass
+
 
 class SyncVideoLoader(VideoLoader):
     def __init__(
@@ -64,6 +85,8 @@ class SyncVideoLoader(VideoLoader):
         is_video_file=False,
     ):
         num_frames = 0
+        video_height = None
+        video_width = None
         self.is_video_file = is_video_file
         self.resource_path = resource_path
         self.frame_names = []
@@ -75,8 +98,8 @@ class SyncVideoLoader(VideoLoader):
             if not self.cap.isOpened():
                 raise ValueError(f"Could not open video: {resource_path}")
             num_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            self.video_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self.video_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            video_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            video_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         else:
             # Image folder
             self.frame_names = [
@@ -87,17 +110,30 @@ class SyncVideoLoader(VideoLoader):
             except ValueError:
                 self.frame_names.sort()
             num_frames = len(self.frame_names)
+            if num_frames == 0:
+                raise RuntimeError(f"no images found in {resource_path}")
             # Load first frame to get dims
-            if num_frames > 0:
-                _, self.video_height, self.video_width = _load_img_as_tensor(
-                    os.path.join(resource_path, self.frame_names[0]), image_size
-                )
+            _, video_height, video_width = _load_img_as_tensor(
+                os.path.join(resource_path, self.frame_names[0]), image_size
+            )
+        if num_frames <= 0:
+            raise RuntimeError(f"Could not determine a positive frame count for {resource_path}")
 
         device = "cpu" if offload_video_to_cpu else "cuda"
-        super().__init__(num_frames, image_size, img_mean, img_std, device)
+        super().__init__(
+            num_frames,
+            image_size,
+            img_mean,
+            img_std,
+            device,
+            video_height=video_height,
+            video_width=video_width,
+        )
         self.cache = {}
 
     def __getitem__(self, idx):
+        if idx < 0 or idx >= self.num_frames:
+            raise IndexError(f"Frame index {idx} out of bounds for {self.num_frames} frames")
         if idx in self.cache:
             return self.cache[idx]
 
@@ -127,7 +163,7 @@ class SyncVideoLoader(VideoLoader):
 
     def cleanup(self, current_idx, window_size=5, reverse=False):
         keys_to_remove = []
-        for idx in self.cache.keys():
+        for idx in list(self.cache.keys()):
             if not reverse:
                 # Forward: remove frames that are too far in the past
                 if idx < current_idx - window_size:
@@ -139,6 +175,12 @@ class SyncVideoLoader(VideoLoader):
 
         for k in keys_to_remove:
             del self.cache[k]
+
+    def close(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        self.cache.clear()
 
 
 class AsyncVideoLoader(VideoLoader):
@@ -154,6 +196,8 @@ class AsyncVideoLoader(VideoLoader):
     ):
         # Initialization similar to Sync, but setup async thread
         num_frames = 0
+        video_height = None
+        video_width = None
         self.is_video_file = is_video_file
         self.resource_path = resource_path
         self.buffer_size = buffer_size
@@ -163,8 +207,8 @@ class AsyncVideoLoader(VideoLoader):
             import cv2
             cap = cv2.VideoCapture(resource_path)
             num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            self.video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self.video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             cap.release()
         else:
             self.frame_names = [
@@ -175,13 +219,24 @@ class AsyncVideoLoader(VideoLoader):
             except ValueError:
                 self.frame_names.sort()
             num_frames = len(self.frame_names)
-            if num_frames > 0:
-                _, self.video_height, self.video_width = _load_img_as_tensor(
-                    os.path.join(resource_path, self.frame_names[0]), image_size
-                )
+            if num_frames == 0:
+                raise RuntimeError(f"no images found in {resource_path}")
+            _, video_height, video_width = _load_img_as_tensor(
+                os.path.join(resource_path, self.frame_names[0]), image_size
+            )
+        if num_frames <= 0:
+            raise RuntimeError(f"Could not determine a positive frame count for {resource_path}")
 
         device = "cpu" if offload_video_to_cpu else "cuda"
-        super().__init__(num_frames, image_size, img_mean, img_std, device)
+        super().__init__(
+            num_frames,
+            image_size,
+            img_mean,
+            img_std,
+            device,
+            video_height=video_height,
+            video_width=video_width,
+        )
 
         self.cache = {}
         self.lock = Lock()
@@ -252,6 +307,8 @@ class AsyncVideoLoader(VideoLoader):
             cap.release()
 
     def __getitem__(self, idx):
+        if idx < 0 or idx >= self.num_frames:
+            raise IndexError(f"Frame index {idx} out of bounds for {self.num_frames} frames")
         # Signal worker to prioritize this area
         with self.lock:
             self.target_idx = idx
@@ -269,7 +326,7 @@ class AsyncVideoLoader(VideoLoader):
     def cleanup(self, current_idx, window_size=5, reverse=False):
         with self.lock:
             keys_to_remove = []
-            for idx in self.cache.keys():
+            for idx in list(self.cache.keys()):
                 if not reverse:
                     if idx < current_idx - window_size:
                         keys_to_remove.append(idx)
@@ -278,6 +335,15 @@ class AsyncVideoLoader(VideoLoader):
                         keys_to_remove.append(idx)
             for k in keys_to_remove:
                 del self.cache[k]
+
+    def close(self):
+        self.stop_event = True
+        thread = getattr(self, "thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+        self.thread = None
+        with self.lock:
+            self.cache.clear()
 
 
 def load_resource_as_video_frames(
@@ -293,6 +359,14 @@ def load_resource_as_video_frames(
     """
     Returns a VideoLoader object instead of a full tensor.
     """
+    if isinstance(resource_path, str) and resource_path.startswith("<load-dummy-video"):
+        if video_loader_type != "cv2":
+            raise RuntimeError("video_loader_type must be 'cv2' for dummy video loading")
+        # Pattern: <load-dummy-video-N> where N is an integer.
+        match = re.match(r"<load-dummy-video-(\d+)>", resource_path)
+        num_frames = int(match.group(1)) if match else 60
+        return load_dummy_video(image_size, offload_video_to_cpu, num_frames=num_frames)
+
     # Handle single image or list of images case (legacy behavior for image inference)
     if isinstance(resource_path, list) or (
         isinstance(resource_path, str) and os.path.splitext(resource_path)[-1].lower() in IMAGE_EXTS
@@ -304,6 +378,8 @@ def load_resource_as_video_frames(
             )
         else:
             # List of PIL images
+            if len(resource_path) == 0:
+                raise RuntimeError("resource_path list is empty")
             img_mean_t = torch.tensor(img_mean, dtype=torch.float16)[:, None, None]
             img_std_t = torch.tensor(img_std, dtype=torch.float16)[:, None, None]
             orig_height, orig_width = resource_path[0].size
@@ -325,6 +401,8 @@ def load_resource_as_video_frames(
 
     if not (is_video_file or is_image_folder):
         raise NotImplementedError("Only video files and image folders are supported for VideoLoader")
+    if video_loader_type != "cv2":
+        raise RuntimeError("video_loader_type must be 'cv2' for VideoLoader")
 
     if async_loading_frames:
         loader = AsyncVideoLoader(
@@ -370,6 +448,15 @@ def load_image_as_single_frame_video(
     images -= img_mean
     images /= img_std
     return images, image_height, image_width
+
+
+def load_dummy_video(image_size, offload_video_to_cpu, num_frames=60):
+    """Load a dummy video for warm-up/compilation purposes."""
+    video_height, video_width = 480, 640
+    images = torch.randn(num_frames, 3, image_size, image_size, dtype=torch.float16)
+    if not offload_video_to_cpu:
+        images = images.cuda()
+    return images, video_height, video_width
 
 
 def _load_img_as_tensor(img_path, image_size):

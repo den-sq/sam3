@@ -249,6 +249,15 @@ class Sam3VideoPredictor:
                 f"{self._get_session_stats()}"
             )
         else:
+            # Explicitly release frame-loader resources (e.g. async loading thread).
+            inference_state = session.get("state", {})
+            input_batch = inference_state.get("input_batch")
+            img_batch = getattr(input_batch, "img_batch", None)
+            if hasattr(img_batch, "close"):
+                try:
+                    img_batch.close()
+                except Exception:
+                    logger.exception("failed to close frame loader for session %s", session_id)
             del session
             gc.collect()
             logger.info(f"removed session {session_id}; {self._get_session_stats()}")
